@@ -1,0 +1,8 @@
+build/
+build_emb/
+dist/
+Output/
+__pycache__/
+*.spec
+*.log
+*.tmp
