@@ -13,8 +13,10 @@ Requires Windows 10/11 with the Microsoft WebView2 Runtime (preinstalled on most
 
 ## Privacy
 
-WUWA Tracker works fully offline. It does not collect, send or share any data.
+WUWA Tracker works offline. It does not collect, send or share any personal data.
 Your progress and task list are stored locally in `%APPDATA%\WuWaTracker`.
+The only network request is an optional update check against the public GitHub releases API
+(it can be switched off in the settings).
 
 ## Build from source
 
@@ -23,11 +25,8 @@ The installer is also built automatically by GitHub Actions (`.github/workflows/
 
 ## Code signing policy
 
-Free code signing provided by [SignPath.io](https://signpath.io), certificate by [SignPath Foundation](https://signpath.org).
-(Status: application pending.)
-
 - Only binaries built by the GitHub Actions workflow in this repository are submitted for signing.
-- Roles: Author / Reviewer / Approver: **@xJubileus**
+- Roles: Author / Reviewer / Approver: **xJubileus**
 
 ## License
 

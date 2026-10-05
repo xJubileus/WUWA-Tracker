@@ -21,7 +21,6 @@ if errorlevel 1 goto fail
 for %%F in ("%ST%\python\python*._pth") do set "PTH=%%F" & set "PB=%%~nF"
 powershell -NoProfile -Command "Set-Content -Path '%PTH%' -Value @('%PB%.zip','.','..\lib','..\app','import site')"
 copy /y wuwa_app.py "%ST%\app\" >nul
-copy /y wuwa-tracker-en.html "%ST%\app\" >nul
 copy /y wuwa.ico "%ST%\app\" >nul
 
 if not exist Output mkdir Output

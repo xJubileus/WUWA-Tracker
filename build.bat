@@ -9,7 +9,7 @@ py -m pip show pyinstaller >nul 2>&1
 if errorlevel 1 py -m pip install pyinstaller
 echo.
 echo Building the program...
-py -m PyInstaller --noconfirm --clean --onedir --windowed --name "WUWA Tracker" --icon wuwa.ico --version-file version.txt --exclude-module tkinter %EXTRA% --add-data "wuwa-tracker-en.html;." --add-data "wuwa.ico;." wuwa_app.py
+py -m PyInstaller --noconfirm --clean --onedir --windowed --name "WUWA Tracker" --icon wuwa.ico --version-file version.txt --exclude-module tkinter %EXTRA% --add-data "wuwa.ico;." wuwa_app.py
 if errorlevel 1 goto fail
 
 if not exist Output mkdir Output
