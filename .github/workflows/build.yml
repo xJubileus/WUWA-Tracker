@@ -12,7 +12,7 @@ jobs:
         with:
           python-version: "3.12"
       - run: pip install pywebview pyinstaller
-      - run: pyinstaller --noconfirm --clean --onedir --windowed --name "WUWA Tracker" --icon wuwa.ico --version-file version.txt --exclude-module tkinter --add-data "wuwa-tracker-en.html;." --add-data "wuwa.ico;." wuwa_app.py
+      - run: pyinstaller --noconfirm --clean --onedir --windowed --name "WUWA Tracker" --icon wuwa.ico --version-file version.txt --exclude-module tkinter --add-data "wuwa.ico;." wuwa_app.py
       - run: choco install innosetup -y --no-progress
       - run: '& "C:\Program Files (x86)\Inno Setup 6\ISCC.exe" installer.iss'
       - uses: actions/upload-artifact@v4
