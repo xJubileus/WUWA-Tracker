@@ -15,6 +15,7 @@ Needs Python 3.12+ and, maybe, Inno Setup. Launch build.bat. The installer is al
 
 ## Code signing policy
 Only the binaries, produced using the GitHub Actions process from this repo, are going to be signed.
+
 Roles: Author / Reviewer / Approver: xJubileus
 
 ## License
