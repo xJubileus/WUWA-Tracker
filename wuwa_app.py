@@ -1,4 +1,4 @@
-import os, sys, ctypes, traceback, threading, time, subprocess
+import os, sys, ctypes, traceback, threading, time, subprocess, json, re
 import webview
 
 def base_dir():
@@ -8,16 +8,24 @@ DATA_DIR = os.path.join(os.environ.get("APPDATA", os.path.expanduser("~")), "WuW
 DATA_FILE = os.path.join(DATA_DIR, "progress.json")
 TASKS_FILE = os.path.join(DATA_DIR, "tasks.json")
 LOG_FILE = os.path.join(DATA_DIR, "error.log")
+SHOW_FILE = os.path.join(DATA_DIR, "show.request")
+POS_FILE = os.path.join(DATA_DIR, "window.json")
+PLACED = {"v": False}
 TITLE = "WUWA Tracker"
 RUN_KEY = r"Software\Microsoft\Windows\CurrentVersion\Run"
 
 def log(msg):
     try:
         os.makedirs(DATA_DIR, exist_ok=True)
+        if os.path.exists(LOG_FILE) and os.path.getsize(LOG_FILE) > 512 * 1024:
+            os.replace(LOG_FILE, LOG_FILE[:-4] + ".old.log")
         with open(LOG_FILE, "a", encoding="utf-8") as f:
-            f.write(msg + "\n")
+            f.write(time.strftime("%Y-%m-%d %H:%M:%S") + "  " + str(msg).rstrip() + "\n")
     except Exception:
         pass
+
+sys.excepthook = lambda t, v, tb: log("".join(traceback.format_exception(t, v, tb)))
+threading.excepthook = lambda a: log("".join(traceback.format_exception(a.exc_type, a.exc_value, a.exc_traceback)))
 
 def bg_color():
     try:
@@ -28,10 +36,184 @@ def bg_color():
     except Exception:
         return "#12141b"
 
+_HWND = None
+ENUMPROC = ctypes.WINFUNCTYPE(ctypes.c_bool, ctypes.c_void_p, ctypes.c_void_p)
+
+def app_windows(pid=None):
+    found = []
+
+    def cb(h, _):
+        buf = ctypes.create_unicode_buffer(256)
+        U.GetWindowTextW(h, buf, 256)
+        if buf.value == TITLE:
+            cls = ctypes.create_unicode_buffer(256)
+            U.GetClassNameW(h, cls, 256)
+            if cls.value.startswith("WindowsForms"):
+                p = wt.DWORD()
+                U.GetWindowThreadProcessId(h, ctypes.byref(p))
+                if pid is None or p.value == pid:
+                    found.append(h)
+        return True
+
+    U.EnumWindows(ENUMPROC(cb), None)
+    return found
+
 def hwnd():
-    u = ctypes.windll.user32
-    u.FindWindowW.restype = ctypes.c_void_p
-    return u.FindWindowW(None, TITLE)
+    global _HWND
+    if not (_HWND and U.IsWindow(_HWND)):
+        w = app_windows(os.getpid())
+        _HWND = w[0] if w else None
+    return _HWND
+
+# ---- run as administrator (needed when the game itself runs elevated) + single instance
+K32 = ctypes.WinDLL("kernel32", use_last_error=True)
+K32.CreateMutexW.restype = ctypes.c_void_p
+K32.CreateMutexW.argtypes = [ctypes.c_void_p, ctypes.c_bool, ctypes.c_wchar_p]
+K32.CloseHandle.argtypes = [ctypes.c_void_p]
+MUTEX = None
+
+def elevated():
+    try:
+        return bool(ctypes.windll.shell32.IsUserAnAdmin())
+    except Exception:
+        return False
+
+def relaunch_elevated():
+    sh = ctypes.windll.shell32
+    sh.ShellExecuteW.argtypes = [ctypes.c_void_p, ctypes.c_wchar_p, ctypes.c_wchar_p, ctypes.c_wchar_p, ctypes.c_wchar_p, ctypes.c_int]
+    sh.ShellExecuteW.restype = ctypes.c_void_p
+    frozen = getattr(sys, "frozen", False) or "__compiled__" in globals()
+    params = "" if frozen else '"%s"' % os.path.abspath(__file__)
+    return (sh.ShellExecuteW(None, "runas", sys.executable, params, None, 1) or 0) > 32
+
+def take_mutex():
+    global MUTEX
+    MUTEX = K32.CreateMutexW(None, False, "Local\\WUWA_Tracker_Instance")
+    return bool(MUTEX) and ctypes.get_last_error() != 183
+
+def release_mutex():
+    global MUTEX
+    if MUTEX:
+        K32.CloseHandle(MUTEX)
+        MUTEX = None
+
+def ask_running_copy():
+    try:
+        U.AllowSetForegroundWindow(0xFFFFFFFF)
+        write(SHOW_FILE, str(time.time()))
+    except Exception:
+        log(traceback.format_exc())
+
+def repaint():
+    """Forces WebView2 to draw again (it can stay blank after UAC prompts, the lock screen or a restore)."""
+    try:
+        h = hwnd()
+        if h:
+            U.RedrawWindow(h, None, None, 0x0001 | 0x0004 | 0x0080 | 0x0100 | 0x0400)
+        w = WINDOW
+        width, height = w.width, w.height
+        w.resize(width, height + 1)
+        time.sleep(0.08)
+        w.resize(width, height)
+    except Exception:
+        log(traceback.format_exc())
+
+def save_pos():
+    try:
+        rc = wt.RECT()
+        U.GetWindowRect(hwnd(), ctypes.byref(rc))
+        write(POS_FILE, json.dumps({"x": rc.left, "y": rc.top}))
+    except Exception:
+        log(traceback.format_exc())
+
+def place_window():
+    if PLACED["v"]:
+        return
+    PLACED["v"] = True
+    try:
+        h = hwnd()
+        rc = wt.RECT()
+        U.GetWindowRect(h, ctypes.byref(rc))
+        width, height = rc.right - rc.left, rc.bottom - rc.top
+        x = y = None
+        try:
+            p = json.loads(read(POS_FILE, "{}"))
+            x, y = int(p["x"]), int(p["y"])
+            if not U.MonitorFromPoint(wt.POINT(x + 40, y + 10), 0):
+                x = y = None
+        except Exception:
+            x = y = None
+        if x is None:
+            wa = wt.RECT()
+            U.SystemParametersInfoW(0x30, 0, ctypes.byref(wa), 0)
+            x = wa.left + (wa.right - wa.left - width) // 2
+            y = wa.top + (wa.bottom - wa.top - height) // 2
+        U.SetWindowPos(h, None, x, y, 0, 0, 0x0001 | 0x0004)
+        U.SetForegroundWindow(h)
+    except Exception:
+        log(traceback.format_exc())
+
+def bring_front():
+    place_window()
+    h = hwnd()
+    if not h:
+        return
+    if U.IsIconic(h):
+        U.ShowWindow(h, 9)
+    U.SetForegroundWindow(h)
+    repaint()
+
+def monitor():
+    secure, had_window, gone = False, False, 0
+    while True:
+        time.sleep(0.5)
+        try:
+            if hwnd():
+                had_window, gone = True, 0
+            elif had_window:
+                gone += 1
+                if gone >= 10:
+                    log("window is gone but the process was still running, exiting")
+                    release_mutex()
+                    os._exit(0)
+            d = U.OpenInputDesktop(0, False, 0x0100)
+            now_secure = not d
+            if d:
+                U.CloseDesktop(d)
+            if secure and not now_secure:
+                log("UAC prompt or lock screen closed, repainting the window")
+                time.sleep(0.5)
+                repaint()
+            secure = now_secure
+            if os.path.exists(SHOW_FILE):
+                try:
+                    os.remove(SHOW_FILE)
+                except OSError:
+                    pass
+                bring_front()
+        except Exception:
+            log(traceback.format_exc())
+            time.sleep(5)
+
+# ---- the user's favourite text editor for tasks.json
+def text_editor():
+    try:
+        import winreg
+        for root, key in ((winreg.HKEY_LOCAL_MACHINE, r"SOFTWARE\Notepad++"), (winreg.HKEY_LOCAL_MACHINE, r"SOFTWARE\WOW6432Node\Notepad++")):
+            try:
+                with winreg.OpenKey(root, key) as k:
+                    p = os.path.join(winreg.QueryValueEx(k, "")[0], "notepad++.exe")
+                    if os.path.exists(p):
+                        return p
+            except OSError:
+                pass
+    except Exception:
+        pass
+    for base in (os.environ.get("ProgramFiles", ""), os.environ.get("ProgramFiles(x86)", "")):
+        p = os.path.join(base, "Notepad++", "notepad++.exe")
+        if base and os.path.exists(p):
+            return p
+    return os.path.join(os.environ.get("WINDIR", r"C:\Windows"), "notepad.exe")
 
 def write(path, data):
     os.makedirs(DATA_DIR, exist_ok=True)
@@ -59,7 +241,22 @@ U.GetWindowLongW.restype = ctypes.c_long
 U.SetWindowLongW.argtypes = [ctypes.c_void_p, ctypes.c_int, ctypes.c_long]
 U.SetLayeredWindowAttributes.argtypes = [ctypes.c_void_p, ctypes.c_uint, ctypes.c_ubyte, ctypes.c_uint]
 U.GetWindowRect.argtypes = [ctypes.c_void_p, ctypes.POINTER(wt.RECT)]
-U.FindWindowW.restype = ctypes.c_void_p
+U.GetWindowTextW.argtypes = [ctypes.c_void_p, ctypes.c_wchar_p, ctypes.c_int]
+U.GetClassNameW.argtypes = [ctypes.c_void_p, ctypes.c_wchar_p, ctypes.c_int]
+U.GetWindowThreadProcessId.argtypes = [ctypes.c_void_p, ctypes.POINTER(wt.DWORD)]
+U.IsWindow.argtypes = [ctypes.c_void_p]
+U.IsIconic.argtypes = [ctypes.c_void_p]
+U.IsWindowVisible.argtypes = [ctypes.c_void_p]
+U.MonitorFromPoint.argtypes = [wt.POINT, ctypes.c_uint]
+U.MonitorFromPoint.restype = ctypes.c_void_p
+U.SystemParametersInfoW.argtypes = [ctypes.c_uint, ctypes.c_uint, ctypes.c_void_p, ctypes.c_uint]
+U.RedrawWindow.argtypes = [ctypes.c_void_p, ctypes.c_void_p, ctypes.c_void_p, ctypes.c_uint]
+U.OpenInputDesktop.restype = ctypes.c_void_p
+U.OpenInputDesktop.argtypes = [ctypes.c_uint, ctypes.c_bool, ctypes.c_uint]
+U.CloseDesktop.argtypes = [ctypes.c_void_p]
+U.AllowSetForegroundWindow.argtypes = [ctypes.c_uint]
+U.ShowWindow.argtypes = [ctypes.c_void_p, ctypes.c_int]
+U.EnumWindows.argtypes = [ENUMPROC, ctypes.c_void_p]
 U.SendMessageW.argtypes = [ctypes.c_void_p, ctypes.c_uint, ctypes.c_void_p, ctypes.c_void_p]
 U.SendMessageW.restype = ctypes.c_void_p
 U.LoadImageW.argtypes = [ctypes.c_void_p, ctypes.c_wchar_p, ctypes.c_uint, ctypes.c_int, ctypes.c_int, ctypes.c_uint]
@@ -69,6 +266,8 @@ WINDOW = None
 CH_H = None
 CH_W = None
 _token = 0
+T_LOCK = threading.Lock()
+T_LAST = None
 OVERLAY = {"on": False, "op": 55, "typing": False}
 
 U.SetForegroundWindow.argtypes = [ctypes.c_void_p]
@@ -111,8 +310,7 @@ def _ov_apply(h, hot):
         U.SetWindowLongW(h, -20, ex)
         U.SetLayeredWindowAttributes(h, 0, a, 2)
     else:
-        U.SetWindowLongW(h, -20, ex & ~(0x20 | 0x08000000))
-        U.SetLayeredWindowAttributes(h, 0, 255, 2)
+        U.SetWindowLongW(h, -20, ex & ~(0x20 | 0x08000000 | 0x80000))
 
 def _ov_loop():
     h = hwnd()
@@ -135,6 +333,7 @@ def _ov_loop():
         time.sleep(0.03)
     try:
         _ov_apply(h, False)
+        repaint()
     except Exception:
         pass
 
@@ -183,7 +382,7 @@ class Api:
             if int(need_w) > int(inner_w):
                 tw = int(need_w) + CH_W
             if abs(th - w.height) > 2 or abs(tw - w.width) > 2:
-                animate(w, tw, th)
+                animate(w, tw, th) if PLACED["v"] else w.resize(tw, th)
         except Exception:
             log(traceback.format_exc())
 
@@ -200,6 +399,7 @@ class Api:
                 U.GetCursorPos(ctypes.byref(pt))
                 U.SetWindowPos(h, None, pt.x - ox, pt.y - oy, 0, 0, 0x15)
                 time.sleep(0.004)
+            save_pos()
 
         threading.Thread(target=run, daemon=True).start()
 
@@ -230,7 +430,7 @@ class Api:
             if str(digest).startswith("sha256:") and sha.hexdigest() != str(digest)[7:].lower():
                 os.remove(path)
                 return "checksum mismatch"
-            subprocess.Popen([path, "/VERYSILENT", "/SUPPRESSMSGBOXES", "/NORESTART", "/CLOSEAPPLICATIONS", "/UPDATE=1"],
+            subprocess.Popen([path, "/VERYSILENT", "/SUPPRESSMSGBOXES", "/NORESTART", "/CLOSEAPPLICATIONS", "/CURRENTUSER", "/UPDATE=1"],
                              creationflags=0x00000008 | 0x08000000, close_fds=True)
             threading.Timer(1.5, lambda: os._exit(0)).start()
             return "ok"
@@ -241,7 +441,27 @@ class Api:
     def open_url(self, url):
         try:
             if str(url).startswith("https://github.com/xJubileus/WUWA-Tracker"):
-                os.startfile(url)
+                subprocess.Popen(["explorer.exe", url])
+        except Exception:
+            log(traceback.format_exc())
+
+    def ready(self):
+        BEAT["ready"] = True
+        BEAT["t"] = time.time()
+        if not PLACED["v"]:
+            threading.Timer(0.2, place_window).start()
+
+    def beat(self):
+        BEAT["t"] = time.time()
+
+    def log_js(self, msg):
+        log("JS: " + str(msg)[:2000])
+
+    def open_log(self):
+        try:
+            if not os.path.exists(LOG_FILE):
+                log("log file created")
+            subprocess.Popen([text_editor(), LOG_FILE])
         except Exception:
             log(traceback.format_exc())
 
@@ -269,21 +489,32 @@ class Api:
             return False
 
     def load_tasks(self):
-        return read(TASKS_FILE, "")
+        global T_LAST
+        with T_LOCK:
+            T_LAST = read(TASKS_FILE, "")
+            return T_LAST
 
     def save_tasks(self, data):
+        global T_LAST
         try:
-            write(TASKS_FILE, data)
+            with T_LOCK:
+                write(TASKS_FILE, data)
+                T_LAST = data
             return True
         except Exception:
             log(traceback.format_exc())
             return False
 
+    def tasks_changed(self):
+        with T_LOCK:
+            cur = read(TASKS_FILE, "")
+            return cur if T_LAST is not None and cur != T_LAST else ""
+
     def open_tasks(self):
         try:
             if not os.path.exists(TASKS_FILE):
                 write(TASKS_FILE, "[]")
-            os.startfile(TASKS_FILE)
+            subprocess.Popen([text_editor(), TASKS_FILE])
         except Exception:
             log(traceback.format_exc())
 
@@ -338,6 +569,56 @@ class Api:
             balloon(title, msg)
         except Exception:
             log(traceback.format_exc())
+
+BEAT = {"ready": False, "t": time.time()}
+
+def restart_self(flag):
+    release_mutex()
+    frozen = getattr(sys, "frozen", False) or "__compiled__" in globals()
+    subprocess.Popen([sys.executable] + ([] if frozen else [os.path.abspath(__file__)]) + [flag], close_fds=True)
+    os._exit(0)
+
+def watchdog():
+    threading.Thread(target=monitor, daemon=True).start()
+    start, reloaded = time.time(), False
+    while not BEAT["ready"]:
+        time.sleep(0.5)
+        if time.time() - start > 15:
+            if not reloaded:
+                log("window stayed blank for 15 s, reloading the interface")
+                reloaded, start = True, time.time()
+                place_window()
+                try:
+                    WINDOW.load_html(HTML)
+                except Exception:
+                    log(traceback.format_exc())
+            elif "--retry" not in sys.argv:
+                log("window still blank, restarting the app")
+                restart_self("--retry")
+            else:
+                log("window still blank after a restart, giving up")
+                ctypes.windll.user32.MessageBoxW(None, "WUWA Tracker could not load its window.\nRestart your PC or reinstall the Microsoft WebView2 Runtime.\nDetails: " + LOG_FILE, TITLE, 0x30)
+                os._exit(1)
+    prev, reloaded = time.time(), 0
+    while True:
+        time.sleep(5)
+        now = time.time()
+        h = hwnd()
+        if now - prev > 30 or not h or U.IsIconic(h) or not U.IsWindowVisible(h):
+            BEAT["t"] = now
+        prev = now
+        if now - BEAT["t"] <= 150:
+            reloaded = 0
+        elif not reloaded:
+            log("interface stopped responding, reloading it")
+            reloaded = now
+            try:
+                WINDOW.load_html(HTML)
+            except Exception:
+                log(traceback.format_exc())
+        elif now - reloaded > 30:
+            log("interface still not responding, restarting the app")
+            restart_self("--restarted")
 
 def set_icon(*args):
     try:
@@ -424,6 +705,10 @@ body{border:1px solid var(--bd)}
 .upd{background:var(--ac);color:#fff;border-radius:8px;padding:5px 8px;margin-bottom:6px;font-size:12px;cursor:pointer}
 .sp select{background:var(--bg);color:var(--tx);border:1px solid var(--bd);border-radius:6px;padding:2px 4px;font-size:12px}
 .mcr{flex-wrap:wrap}.mcr span{flex:1 1 100%}.mcr input.dt{width:100px;height:24px;padding:2px 6px;font-size:11px}.mcr .x{margin-left:auto;font-size:12px}.warn{color:#e5a33d}.bad{color:#e05555}
+.item.grp{align-items:stretch;cursor:default}.item.grp>div{flex:1}.gh{display:flex;justify-content:space-between;align-items:center;gap:6px}
+.sub{display:flex;gap:8px;align-items:center;margin-top:6px;cursor:pointer}.sub b{font-size:12px}.sub.sd b{text-decoration:line-through;opacity:.6}
+.subs{display:flex;flex-direction:column;gap:3px}.subs .r{display:flex;gap:4px}.subs .r input{flex:1}
+.mcbar{flex:1 1 100%;margin:1px 0 2px}.mcr input.n{width:70px}.mcbar i.warn{background:#e5a33d}.mcbar i.bad{background:#e05555}.lk{text-decoration:underline;cursor:pointer}
 </style></head><body><main>
 <div id="tb" onpointerdown="tbDown(event)"><img id="tbi" alt=""><span class="t">WUWA Tracker</span><button onclick="api('minimize')">&#8211;</button><button class="cl" onclick="api('close')">&#10005;</button></div>
 <div id="upd"></div><div class="tabs" id="tabs"></div><div id="set"></div>
@@ -437,30 +722,33 @@ const DEF=[
 ['d','daily','Daily Activity (Guidebook)','Complete daily tasks, reach 100 activity and claim the Astrite'],
 ['d','podcast','Pioneer Podcast daily tasks','Battle pass XP, claim the rewards'],
 ['d','resp','Open-world gathering / Echo farming','Reset respawns materials and enemies'],
-['d','nest_fg','Nightmare Nest: Fallen Grave','Dream of the Lost · Havoc Warrior, Glacio Predator, Tambourinist · up to 36 per day, no Waveplate',4],
-['d','nest_hc','Nightmare Nest: Honami City','Thread of Severed Fate · Tick Tack, Dwarf Cassowary, Roseshroom · up to 36 per day, no Waveplate',4],
-['d','nest_tw','Nightmare Nest: The Wastelands','Crown of Valor · Electro Predator, Aero Predator, Violet-Feathered Heron · up to 36 per day, no Waveplate',4],
-['d','nest_thc',"Nightmare Nest: Three Heroes' Crest","Flamewing's Shadow · Baby Roseshroom, Baby Viridblaze Saurian, Viridblaze Saurian · up to 36 per day, no Waveplate",4],
-['d','nest_tv','Nightmare Nest: Tideline Verge','Law of Harmony · Gulpuff, Chirpuff, Cyan-Feathered Heron · up to 36 per day, no Waveplate',4],
+['d','nests','Nightmare Nests','Up to 36 Tacet Discords per nest each day',5,0,[
+ ['fg','Fallen Grave','Dream of the Lost · Havoc Warrior, Glacio Predator, Tambourinist'],
+ ['hc','Honami City','Thread of Severed Fate · Tick Tack, Dwarf Cassowary, Roseshroom'],
+ ['tw','The Wastelands','Crown of Valor · Electro Predator, Aero Predator, Violet-Feathered Heron'],
+ ['thc',"Three Heroes' Crest","Flamewing's Shadow · Baby Roseshroom, Baby Viridblaze Saurian, Viridblaze Saurian"],
+ ['tv','Tideline Verge','Law of Harmony · Gulpuff, Chirpuff, Cyan-Feathered Heron']]],
 ['w','boss','3 Weekly Challenge boss rewards','3 rewards per week, 60 Waveplates each: Forte materials and Echoes',1,3],
-['w','pod','Pioneer Podcast weekly tasks','Reset on Monday'],
+['w','pod','Pioneer Podcast weekly tasks','Weekly missions, claim the rewards'],
 ['w','ww','Whimpering Wastes','Weekly reset, challenges give Astrite (check current status after each patch)'],
 ['w','toa','Tower of Adversity: Stable/Experimental Zone','Uses Vigor, crests = Astrite. Check the current cycle'],
 ['w','echo','Use boosted Echo drop chances','Weekly allowance, see how many are left in the Data Bank'],
 ['w','holo','Tactical Hologram challenges','If there is a new or uncleared stage'],
-['w','dream','Fantasies of the Thousand Gateways','Dreamscape Mode: recurring 13-stage combat challenge, resets every Monday',2],
+['w','dream','Fantasies of the Thousand Gateways','Dreamscape Mode: 13-stage combat challenge',2],
 ['m','hazard','Tower of Adversity: Hazard Zone','Cycle may change (14 days or 1 month), check the current dates'],
 ['m','events','Version events and battle pass season','Check which event or BP level ends soon']
-].map(x=>({c:x[0],id:x[1],t:x[2],s:x[3],v:x[4]||1,mx:x[5]||0}));
+].map(x=>({c:x[0],id:x[1],t:x[2],s:x[3],v:x[4]||1,mx:x[5]||0,...(x[6]?{sub:x[6].map(y=>({id:y[0],t:y[1],s:y[2]}))}:{})}));
+const cl=x=>JSON.parse(JSON.stringify(x));
 const esc=s=>String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/"/g,'&quot;');
-const SRV={EU:['Europe',1],AM:['America',-5],AS:['Asia',8],SEA:['SEA',8],HMT:['HMT',8]},SD={top:0,auto:0,rem:1,remH:3,edit:0,op:55,srv:'EU',wpn:1,wpm:15,upd:1},VER='1.2.0';
-let SO=3*36e5,UPD=null;const OFF=()=>SRV[st.set.srv||'EU'][1],UT=()=>'UTC'+(OFF()<0?'':'+')+OFF(),setSO=()=>{SO=(4-OFF())*36e5},cmp=(a,b)=>{const x=a.split('.').map(Number),y=b.split('.').map(Number);for(let i=0;i<3;i++)if((x[i]||0)!==(y[i]||0))return(x[i]||0)-(y[i]||0);return 0};
+const SRV={EU:['Europe',1],AM:['America',-5],AS:['Asia',8],SEA:['SEA',8],HMT:['HMT',8]},SD={top:0,auto:0,rem:1,remH:3,edit:0,op:55,srv:'EU',wpn:1,wpm:15,upd:1},VER='1.3.0';
+let SO=3*36e5,UPD=null,LB=0;const OFF=()=>SRV[st.set.srv||'EU'][1],UT=()=>'UTC'+(OFF()<0?'':'+')+OFF(),setSO=()=>{SO=(4-OFF())*36e5},cmp=(a,b)=>{const x=a.split('.').map(Number),y=b.split('.').map(Number);for(let i=0;i<3;i++)if((x[i]||0)!==(y[i]||0))return(x[i]||0)-(y[i]||0);return 0};
 const ICON='data:image/png;base64,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';
 function tbDown(e){if(e.target.closest('button'))return;api('start_drag')}
 const CRI='data:image/png;base64,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';
 const WPI='data:image/png;base64,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';
 let st={done:{},tab:'d',set:{...SD},cnt:{},mc:null,mcN:-1,wp:null,streak:0,lastFull:-1,prev:null,remDay:-1,banners:null,ui:0},tasks=[],cur={},nxStr='';
 const api=(f,...a)=>{try{return Promise.resolve(pywebview.api[f](...a)).catch(()=>null)}catch(e){return Promise.resolve(null)}};
+window.addEventListener('error',e=>api('log_js',(e.message||'error')+' (line '+(e.lineno||'?')+')'));window.addEventListener('unhandledrejection',e=>api('log_js','promise: '+((e.reason&&e.reason.message)||e.reason)));
 const save=()=>api('save',JSON.stringify(st));
 const saveT=()=>api('save_tasks',JSON.stringify(tasks));
 function keys(){const sh=Date.now()-SO,dk=Math.floor(sh/864e5),sd=new Date(sh),wk=Math.floor((dk+3)/7);
@@ -475,14 +763,18 @@ function updClick(){if(!UPD||UPD.busy)return;if(!UPD.a){api('open_url',UPD.u);re
 function crText(){const w=wpNow();if(!w)return'Waveplate Crystal: type your current value →';return w.c+'/480 · '+(w.c>=480?'FULL, overflow is wasted!':(w.left?'starts when Waveplate is full · ':'')+'full in '+fmt(w.cleft))}
 const mcLeft=()=>st.mc?st.mc.end-Date.now():null;
 function mcText(){const l=mcLeft();if(l===null)return'Lunite Subscription: not set, enter days left or the purchase date';if(l<=0)return'Lunite Subscription: expired, renew?';return'Lunite Subscription: '+Math.floor(l/864e5)+'d '+p2(Math.floor(l%864e5/36e5))+'h left (ends '+loc(st.mc.end)+')'}
-function mcUpd(){const l=mcLeft(),e=$('mct');e.textContent=mcText();e.className=l!==null&&l<=0?'bad':l!==null&&l<=3*864e5?'warn':''}
-function tick(f){const k=keys();if(!f&&(k.d!==cur.d||k.w!==cur.w||k.m!==cur.m)){render();return}
+function mcUpd(){const l=mcLeft(),e=$('mct'),p=$('mcp');e.textContent=mcText();e.className=l!==null&&l<=0?'bad':l!==null&&l<=3*864e5?'warn':'';if(p){const s0=st.mc?(st.mc.start||st.mc.end-30*864e5):0;p.style.width=st.mc?Math.max(0,Math.min(100,(Date.now()-s0)/(st.mc.end-s0)*100))+'%':'0';p.className=e.className}}
+function tick(f){if(Date.now()-LB>15e3){LB=Date.now();api('beat')}const k=keys();if(!f&&(k.d!==cur.d||k.w!==cur.w||k.m!==cur.m)){render();return}
  if(st.tab==='b')document.querySelectorAll('.bn').forEach(el=>{const c=el.querySelector('.bc'),s=+c.dataset.s,e=+c.dataset.e,n=Date.now();c.textContent=n<s?'starts in '+fmt(s-n):n>=e?'Ended':fmt(e-n);el.querySelector('i').style.width=Math.max(0,Math.min(100,(n-s)/(e-s)*100))+'%'});
  else{$('cd').textContent='Resets in '+fmt(k.next[st.tab]-Date.now())+' ('+nxStr+')';if($('wpt'))$('wpt').textContent=wpText();if($('crt'))$('crt').textContent=crText();if($('mct'))mcUpd()}
  {const l=mcLeft();if(st.set.rem&&l!==null&&l>0&&l<=3*864e5&&st.mcN!==k.d){st.mcN=k.d;save();api('notify','WUWA Tracker','Lunite Subscription ends in '+Math.ceil(l/864e5)+' day(s)')}}
  {const w=wpNow();if(st.set.wpn&&w&&w.left>0&&w.left<=st.set.wpm*6e4&&st.wpFor!==st.wp.ts){st.wpFor=st.wp.ts;save();api('notify','WUWA Tracker','Waveplate full in '+Math.ceil(w.left/6e4)+' min ('+w.v+'/240)')}}
  if(st.set.rem&&st.remDay!==k.d&&k.next.d-Date.now()<=st.set.remH*36e5){const n=tasks.filter(t=>t.c==='d'&&!isDn(t)).length;if(n){st.remDay=k.d;save();api('notify','WUWA Tracker',n+' daily task(s) left. Reset in '+fmt(k.next.d-Date.now()))}}}
-const cv=t=>{const o=st.cnt[t.id];return o&&o.k===keys()[t.c]?o.v:0},isDn=t=>t.mx>0?cv(t)>=t.mx:st.done[t.id]===keys()[t.c];
+const cv=t=>{const o=st.cnt[t.id];return o&&o.k===keys()[t.c]?o.v:0},sd=(t,x)=>st.done[t.id+'/'+x.id]===keys()[t.c],isDn=t=>t.sub?t.sub.length>0&&t.sub.every(x=>sd(t,x)):t.mx>0?cv(t)>=t.mx:st.done[t.id]===keys()[t.c];
+function tgs(id,sid){const t=tasks.find(x=>x.id===id),k=keys()[t.c],key=id+'/'+sid;st.done[key]=st.done[key]===k?null:k;chk();save();setTimeout(render,isDn(t)?250:0)}
+function eds(id,sid,v){tasks.find(x=>x.id===id).sub.find(x=>x.id===sid).t=v;saveT()}
+function dels(id,sid){const t=tasks.find(x=>x.id===id);t.sub=t.sub.filter(x=>x.id!==sid);saveT();render()}
+function adds(id,el){const v=el.value.trim();if(!v)return;tasks.find(x=>x.id===id).sub.push({id:'s'+Date.now(),t:v,s:''});saveT();render()}
 function inc(id,d){const t=tasks.find(x=>x.id===id);st.cnt[id]={k:keys()[t.c],v:Math.max(0,Math.min(t.mx,cv(t)+d))};chk();save();render()}
 function chk(){const k=keys(),ds=tasks.filter(t=>t.c==='d');if(!ds.length)return;const full=ds.every(isDn);
  if(full&&st.lastFull!==k.d){st.prev={s:st.streak||0,l:st.lastFull};st.streak=(st.lastFull===k.d-1?st.streak:0)+1;st.lastFull=k.d}
@@ -493,7 +785,7 @@ function settings(){const s=st.set,ck=(k,l)=>`<label><input type="checkbox" ${s[
  ck('top','Always on top <span class="mu">(see-through; hold ALT to use it)</span>')+(s.top?`<label>Opacity ${nu('op',20,100,55)} %</label>`:'')+ck('auto','Start with Windows')+
  `<label><input type="checkbox" ${s.rem?'checked':''} onchange="sw('rem',this.checked)"> Task reminder ${nu('remH',1,23,3)} h before reset</label>`+
  `<label><input type="checkbox" ${s.wpn?'checked':''} onchange="sw('wpn',this.checked)"> Waveplate alert ${nu('wpm',5,60,15)} min before full</label>`+ck('upd','Check for updates (GitHub)')+ck('edit','Edit tasks')+
- (s.edit?`<div class="r"><button onclick="defs()">Restore defaults</button><button onclick="api('open_tasks')">Open tasks file</button></div>`:'')+`<span class="mu">v${VER}</span></div>`}
+ (s.edit?`<div class="r"><button onclick="defs()">Restore defaults</button><button onclick="api('open_tasks')">Open tasks file</button></div>`:'')+`<span class="mu">v${VER} · <a class="lk" onclick="api('open_log')">error log</a></span></div>`}
 function sw(k,v){st.set[k]=typeof v==='boolean'?(v?1:0):v;if(k==='top'||k==='op')api('set_on_top',st.set.top,st.set.op||55);if(k==='rem')st.remDay=-1;if(k==='srv'){setSO();st.done={};st.cnt={}}
  if(k==='auto')api('set_autostart',st.set.auto).then(r=>{if(r!==null){st.set.auto=r?1:0;save();render()}});
  save();render()}
@@ -514,23 +806,24 @@ function render(){const k=keys(),c=st.tab,B=c==='b',ed=st.set.edit;cur=k;
  $('pb').style.width=(all.length?dn.length/all.length*100:0)+'%';
  $('wp').innerHTML=c==='d'?wpRows():c==='m'?mcRow():'';
  const da=(i,d)=>d?'':`data-dg="t" data-id="${i.id}" onpointerdown="dstart(event,'t','${i.id}')"`,body=i=>`<div><b>${esc(i.t)}</b><span>${esc(i.s)}</span></div>`,
- row=(i,d)=>i.mx>0?`<div class="item ${d?'done':''}" ${da(i,d)} title="${esc(i.s)}" onclick="inc('${i.id}',1)" style="cursor:pointer"><span class="ctn">${cv(i)}/${i.mx}</span>${body(i)}<button class="x" onclick="event.stopPropagation();inc('${i.id}',-1)">−</button></div>`:`<label class="item ${d?'done':''}" ${da(i,d)} title="${esc(i.s)}"><input type="checkbox" ${d?'checked':''} onchange="tg('${i.id}')">${body(i)}</label>`;
- const erow=i=>`<div class="item ed"><input value="${esc(i.t)}" onchange="ed('${i.id}','t',this.value)"><input value="${esc(i.s||'')}" placeholder="description" onchange="ed('${i.id}','s',this.value)"><div style="display:flex;gap:6px;align-items:center;justify-content:space-between"><span class="mu">Counter target (0 = checkbox)</span><input class="n" value="${i.mx||0}" onchange="ed('${i.id}','mx',Math.max(0,+this.value.replace(/[^0-9]/g,'')||0))"><button class="x" onclick="del('${i.id}')">✕ delete</button></div></div>`;
+ grp=(i,d)=>`<div class="item grp ${d?'done':''}" ${da(i,d)}><div><div class="gh"><b>${esc(i.t)}</b><span class="ctn">${i.sub.filter(x=>sd(i,x)).length}/${i.sub.length}</span></div><span>${esc(i.s)}</span>${i.sub.map(x=>`<label class="sub ${sd(i,x)?'sd':''}"><input type="checkbox" ${sd(i,x)?'checked':''} onchange="tgs('${i.id}','${x.id}')"><div><b>${esc(x.t)}</b><span>${esc(x.s)}</span></div></label>`).join('')}</div></div>`,
+ row=(i,d)=>i.sub?grp(i,d):i.mx>0?`<div class="item ${d?'done':''}" ${da(i,d)} title="${esc(i.s)}" onclick="inc('${i.id}',1)" style="cursor:pointer"><span class="ctn">${cv(i)}/${i.mx}</span>${body(i)}<button class="x" onclick="event.stopPropagation();inc('${i.id}',-1)">−</button></div>`:`<label class="item ${d?'done':''}" ${da(i,d)} title="${esc(i.s)}"><input type="checkbox" ${d?'checked':''} onchange="tg('${i.id}')">${body(i)}</label>`;
+ const erow=i=>`<div class="item ed"><input value="${esc(i.t)}" onchange="ed('${i.id}','t',this.value)"><input value="${esc(i.s||'')}" placeholder="description" onchange="ed('${i.id}','s',this.value)">${i.sub?`<div class="subs">${i.sub.map(x=>`<div class="r"><input value="${esc(x.t)}" onchange="eds('${i.id}','${x.id}',this.value)"><button class="x" onclick="dels('${i.id}','${x.id}')">✕</button></div>`).join('')}<input placeholder="Add item… (Enter)" onkeydown="if(event.key==='Enter')adds('${i.id}',this)"></div>`:''}<div style="display:flex;gap:6px;align-items:center;justify-content:space-between">${i.sub?'<span></span>':'<span class="mu">Counter target (0 = checkbox)</span>'}${i.sub?'':`<input class="n" value="${i.mx||0}" onchange="ed('${i.id}','mx',Math.max(0,+this.value.replace(/[^0-9]/g,'')||0))">`}<button class="x" onclick="del('${i.id}')">✕ delete</button></div></div>`;
  $('list').innerHTML=ed?all.map(erow).join(''):(todo.length?todo.map(i=>row(i,0)).join(''):'<div class="empty">🎉 All done, ready for the reset!</div>')+(dn.length?`<details><summary>Completed (${dn.length}) – open to undo</summary>${dn.map(i=>row(i,1)).join('')}</details>`:'');
  $('add').className='add';$('add').innerHTML='<input id="ni" placeholder="Add task…" onkeydown="if(event.key===\'Enter\')add()"><button onclick="add()">+</button>';tick(true)}
 function tg(id){const t=tasks.find(x=>x.id===id),k=keys()[t.c];st.done[id]=st.done[id]===k?null:k;chk();save();setTimeout(render,250)}
 function ed(id,f,v){tasks.find(x=>x.id===id)[f]=v;saveT()}
 function del(id){tasks=tasks.filter(x=>x.id!==id);saveT();chk();save();render()}
-function defs(){tasks=DEF.map(x=>({...x}));saveT();render()}
+function defs(){tasks=DEF.map(cl);saveT();render()}
 function add(){const v=$('ni').value.trim();if(!v)return;tasks.push({c:st.tab,id:'c'+Date.now(),t:v,s:''});saveT();render()}
 const ni=(id,mx,fn)=>`<input class="n" id="${id}" type="text" inputmode="numeric" maxlength="${mx}" placeholder="now" oninput="this.value=this.value.replace(/[^0-9]/g,'')" onkeydown="if(event.key==='Enter')${fn}()">`,
  wpRows=()=>`<div class="wp"><img class="ic" src="${WPI}"><span id="wpt"></span>${ni('wpi',3,'setWp')}</div><div class="wp"><img class="ic" src="${CRI}"><span id="crt"></span>${ni('cri',3,'setCr')}</div>`,
- mcRow=()=>`<div class="wp mcr"><span id="mct"></span>${ni('mcd',2,'setMc').replace('placeholder="now"','placeholder="days left"')}<input class="dt" id="mcb" readonly placeholder="bought on" data-cb="mcDate" onclick="dpOpen('mcb')"><button class="x" title="Renewed: add 30 days" onclick="mcPlus()">+30d</button></div>`;
+ mcRow=()=>`<div class="wp mcr"><span id="mct"></span><div class="bar mcbar"><i id="mcp"></i></div>${ni('mcd',2,'setMc').replace('placeholder="now"','placeholder="days left"')}<input class="dt" id="mcb" readonly placeholder="bought on" data-cb="mcDate" onclick="dpOpen('mcb')"><button class="x" title="Renewed: add 30 days" onclick="mcPlus()">+30d</button></div>`;
 function setWp(){const v=parseInt($('wpi').value);if(isNaN(v)||v<0)return;const w=wpNow();st.wp={v,ts:Date.now(),c:w?w.c:0};save();render()}
 function setCr(){const v=parseInt($('cri').value);if(isNaN(v)||v<0)return;const w=wpNow();st.wp={v:w?w.v:240,ts:Date.now(),c:Math.min(480,v)};save();render()}
-function setMc(){const d=parseInt($('mcd').value);if(isNaN(d)||d<0)return;st.mc={end:keys().next.d+(d-1)*864e5};save();render()}
-function mcDate(v){const ms=pd(v);if(!ms)return;st.mc={end:ms+30*864e5};save();render()}
-function mcPlus(){st.mc={end:Math.max(st.mc?st.mc.end:0,Date.now())+30*864e5};save();render()}
+function setMc(){const d=parseInt($('mcd').value);if(isNaN(d)||d<0)return;{const end=keys().next.d+(d-1)*864e5;st.mc={start:Math.min(end-30*864e5,Date.now()),end}}save();render()}
+function mcDate(v){const ms=pd(v);if(!ms)return;st.mc={start:ms,end:ms+30*864e5};save();render()}
+function mcPlus(){{const a=!!st.mc&&st.mc.end>Date.now();st.mc={start:a?(st.mc.start||st.mc.end-30*864e5):Date.now(),end:(a?st.mc.end:Date.now())+30*864e5}}save();render()}
 const pd=v=>{if(!v)return null;const[d,t]=v.split('T'),[y,m,dd]=d.split('-').map(Number),[h,mi]=t.split(':').map(Number);return Date.UTC(y,m-1,dd,h-OFF(),mi)};
 const tv=ms=>new Date(ms+OFF()*36e5).toISOString().slice(0,16);
 const fv=v=>v.slice(8,10)+'/'+v.slice(5,7)+'/'+v.slice(0,4)+' '+v.slice(11,16);
@@ -575,14 +868,14 @@ function boot(a,b){if(booted)return;booted=1;
  try{const o=JSON.parse(a||'{}');if(o.done)st=Object.assign(st,o);st.set=Object.assign({},SD,st.set)}catch(e){}
  if(!a)st.ui=1;setSO();
  try{const t=JSON.parse(b||'null');if(Array.isArray(t))tasks=t}catch(e){}
- if(!b){tasks=DEF.map(x=>({...x}));saveT()}
- {const dv=st.defV||1;if(b&&dv<4){tasks=tasks.filter(t=>!['nests','wp','crystal','shop','wshop','mshop','mcard'].includes(t.id));DEF.filter(x=>x.v>dv&&!tasks.some(t=>t.id===x.id)).forEach(x=>{const ix=tasks.map(t=>t.c).lastIndexOf(x.c);tasks.splice(ix<0?tasks.length:ix+1,0,{...x})});tasks.forEach(t=>{const d=DEF.find(x=>x.id===t.id);if(d&&d.mx&&t.mx==null)t.mx=d.mx});saveT()}st.defV=4}
+ if(!b){tasks=DEF.map(cl);saveT()}
+ {const dv=st.defV||1;if(b&&dv<5){const rm=['nest_fg','nest_hc','nest_tw','nest_thc','nest_tv'].concat(dv<4?['nests','wp','crystal','shop','wshop','mshop','mcard']:[]);tasks=tasks.filter(t=>!rm.includes(t.id));DEF.filter(x=>x.v>dv&&!tasks.some(t=>t.id===x.id)).forEach(x=>{const ix=tasks.map(t=>t.c).lastIndexOf(x.c);tasks.splice(ix<0?tasks.length:ix+1,0,cl(x))});tasks.forEach(t=>{const d=DEF.find(x=>x.id===t.id);if(!d)return;if(d.mx&&t.mx==null)t.mx=d.mx;if(t.id==='pod'&&t.s==='Reset on Monday')t.s=d.s;if(t.id==='dream'&&/resets every Monday/.test(t.s||''))t.s=d.s});saveT()}st.defV=5}
  if(st.custom&&st.custom.length){st.custom.forEach(x=>tasks.push({c:x.c,id:x.id,t:x.t,s:''}));delete st.custom;saveT()}
  (st.banners||[]).forEach(b=>{if(b.id==='b1'&&b.n==='Hsin banner')b.n='Hsin'});
  if(!st.banners){st.banners=[{id:'b1',n:'Hsin',s:Date.UTC(2026,8,30,3,0),e:Date.UTC(2026,9,22,8,59)}]}
- save();render();setInterval(tick,1000);
+ save();render();setInterval(tick,1000);api('ready');
  document.addEventListener('visibilitychange',()=>tick());window.addEventListener('focus',()=>tick());window.addEventListener('beforeunload',()=>save());
- {document.addEventListener('focusin',e=>{if(st.set.top&&e.target.matches&&e.target.matches('input[type=text],input:not([type])'))api('typing',1)});document.addEventListener('focusout',e=>{if(e.target.matches&&e.target.matches('input'))api('typing',0)});$('tbi').src=ICON;if(st.set.upd)fetch('https://api.github.com/repos/xJubileus/WUWA-Tracker/releases/latest').then(x=>x.json()).then(j=>{const v=String(j.tag_name||'').replace(/^v/,'');if(v&&cmp(v,VER)>0){const as=(j.assets||[]).find(x=>/Setup\.exe$/i.test(x.name||''));UPD={v,u:String(j.html_url),a:as?String(as.browser_download_url):'',d:as?String(as.digest||''):''};render()}}).catch(()=>{});if(st.set.top)api('set_on_top',1,st.set.op||55);api('get_autostart').then(v=>{if(v!==null&&(v?1:0)!==st.set.auto){st.set.auto=v?1:0;save();render()}});}}
+ {document.addEventListener('focusin',e=>{if(st.set.top&&e.target.matches&&e.target.matches('input[type=text],input:not([type])'))api('typing',1)});document.addEventListener('focusout',e=>{if(e.target.matches&&e.target.matches('input'))api('typing',0)});$('tbi').src=ICON;window.addEventListener('focus',()=>api('tasks_changed').then(t=>{if(!t)return;try{const a=JSON.parse(t);if(Array.isArray(a)){tasks=a;chk();saveT();render()}}catch(e){}}));if(st.set.upd)fetch('https://api.github.com/repos/xJubileus/WUWA-Tracker/releases/latest').then(x=>x.json()).then(j=>{const v=String(j.tag_name||'').replace(/^v/,'');if(v&&cmp(v,VER)>0){const as=(j.assets||[]).find(x=>/Setup\.exe$/i.test(x.name||''));UPD={v,u:String(j.html_url),a:as?String(as.browser_download_url):'',d:as?String(as.digest||''):''};render()}}).catch(()=>{});if(st.set.top)api('set_on_top',1,st.set.op||55);api('get_autostart').then(v=>{if(v!==null&&(v?1:0)!==st.set.auto){st.set.auto=v?1:0;save();render()}});}}
 const loadApp=()=>Promise.all([pywebview.api.load(),pywebview.api.load_tasks()]).then(r=>boot(r[0]==='{}'?'':r[0],r[1])).catch(()=>boot('',''));
 window.pywebview&&pywebview.api?loadApp():window.addEventListener('pywebviewready',loadApp);
 </script></body></html>
@@ -595,9 +888,31 @@ if __name__ == "__main__":
         pass
     os.environ.setdefault("WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS", "--disable-gpu")
     os.makedirs(DATA_DIR, exist_ok=True)
+    if not take_mutex():
+        ask_running_copy()
+        sys.exit(0)
+    if not elevated() and "--noadmin" not in sys.argv:
+        release_mutex()
+        if relaunch_elevated():
+            sys.exit(0)
+        log("administrator rights were declined, running without them")
+        if not take_mutex():
+            ask_running_copy()
+            sys.exit(0)
+    try:
+        os.remove(SHOW_FILE)
+    except OSError:
+        pass
     icon = os.path.join(base_dir(), "wuwa.ico")
     WINDOW = webview.create_window(TITLE, html=HTML, js_api=Api(), width=360, height=640,
-                                   min_size=(300, 150), background_color=bg_color(),
+                                   min_size=(300, 150), background_color=bg_color(), x=-20000, y=-20000,
                                    frameless=True, easy_drag=False)
     WINDOW.events.shown += set_icon
-    webview.start(icon=icon, private_mode=False, storage_path=os.path.join(DATA_DIR, "webview"))
+    m = re.search(r"VER='([^']+)'", HTML)
+    log("start v%s, administrator: %s" % (m.group(1) if m else "?", elevated()))
+    threading.Thread(target=watchdog, daemon=True).start()
+    webview.start(icon=icon, private_mode=False,
+                  storage_path=os.path.join(DATA_DIR, "webview-admin" if elevated() else "webview"))
+    log("window closed, exiting")
+    release_mutex()
+    os._exit(0)

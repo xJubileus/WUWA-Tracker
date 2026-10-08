@@ -1,6 +1,9 @@
 #define AppName "WUWA Tracker"
-#define AppVer "1.2.0"
+#define AppVer "1.3.0"
 #define AppExe "WUWA Tracker.exe"
+#ifndef SourceDir
+  #define SourceDir "dist\WUWA Tracker"
+#endif
 
 [Setup]
 AppId={{B6B2E6F4-5D9B-4C58-9F30-3C7F1A2D8E11}
@@ -8,14 +11,14 @@ AppName={#AppName}
 AppVersion={#AppVer}
 AppPublisher=Jubileus
 AppCopyright=Copyright (c) 2026 Jubileus
-VersionInfoVersion=1.2.0.0
+VersionInfoVersion=1.3.0.0
 VersionInfoCompany=Jubileus
 VersionInfoDescription=WUWA Tracker Setup
 VersionInfoProductName=WUWA Tracker
 DefaultDirName={autopf}\{#AppName}
 DisableProgramGroupPage=yes
 PrivilegesRequired=lowest
-PrivilegesRequiredOverridesAllowed=dialog
+PrivilegesRequiredOverridesAllowed=commandline dialog
 OutputDir=Output
 OutputBaseFilename=WUWA-Tracker-Setup
 SetupIconFile=wuwa.ico
@@ -29,7 +32,7 @@ CloseApplications=yes
 Name: "desktopicon"; Description: "Create a desktop shortcut"; GroupDescription: "Shortcuts:"
 
 [Files]
-Source: "dist\WUWA Tracker\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs createallsubdirs
+Source: "{#SourceDir}\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs createallsubdirs
 
 [Icons]
 Name: "{autoprograms}\{#AppName}"; Filename: "{app}\{#AppExe}"
