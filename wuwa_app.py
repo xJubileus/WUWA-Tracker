@@ -1,4 +1,4 @@
-import os, sys, ctypes, traceback, threading, time
+import os, sys, ctypes, traceback, threading, time, subprocess
 import webview
 
 def base_dir():
@@ -211,6 +211,32 @@ class Api:
                 U.SetForegroundWindow(hwnd())
         except Exception:
             log(traceback.format_exc())
+
+    def do_update(self, url, digest=""):
+        try:
+            if not str(url).startswith("https://github.com/xJubileus/WUWA-Tracker/releases/download/"):
+                return "invalid address"
+            import urllib.request, hashlib, tempfile
+            path = os.path.join(tempfile.gettempdir(), "WUWA-Tracker-Update.exe")
+            req = urllib.request.Request(url, headers={"User-Agent": "WUWA-Tracker"})
+            sha = hashlib.sha256()
+            with urllib.request.urlopen(req, timeout=60) as resp, open(path, "wb") as f:
+                while True:
+                    chunk = resp.read(1 << 16)
+                    if not chunk:
+                        break
+                    f.write(chunk)
+                    sha.update(chunk)
+            if str(digest).startswith("sha256:") and sha.hexdigest() != str(digest)[7:].lower():
+                os.remove(path)
+                return "checksum mismatch"
+            subprocess.Popen([path, "/VERYSILENT", "/SUPPRESSMSGBOXES", "/NORESTART", "/CLOSEAPPLICATIONS", "/UPDATE=1"],
+                             creationflags=0x00000008 | 0x08000000, close_fds=True)
+            threading.Timer(1.5, lambda: os._exit(0)).start()
+            return "ok"
+        except Exception:
+            log(traceback.format_exc())
+            return "download error"
 
     def open_url(self, url):
         try:
@@ -427,7 +453,7 @@ const DEF=[
 ['m','events','Version events and battle pass season','Check which event or BP level ends soon']
 ].map(x=>({c:x[0],id:x[1],t:x[2],s:x[3],v:x[4]||1,mx:x[5]||0}));
 const esc=s=>String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/"/g,'&quot;');
-const SRV={EU:['Europe',1],AM:['America',-5],AS:['Asia',8],SEA:['SEA',8],HMT:['HMT',8]},SD={top:0,auto:0,rem:1,remH:3,edit:0,op:55,srv:'EU',wpn:1,wpm:15,upd:1},VER='1.1.0';
+const SRV={EU:['Europe',1],AM:['America',-5],AS:['Asia',8],SEA:['SEA',8],HMT:['HMT',8]},SD={top:0,auto:0,rem:1,remH:3,edit:0,op:55,srv:'EU',wpn:1,wpm:15,upd:1},VER='1.2.0';
 let SO=3*36e5,UPD=null;const OFF=()=>SRV[st.set.srv||'EU'][1],UT=()=>'UTC'+(OFF()<0?'':'+')+OFF(),setSO=()=>{SO=(4-OFF())*36e5},cmp=(a,b)=>{const x=a.split('.').map(Number),y=b.split('.').map(Number);for(let i=0;i<3;i++)if((x[i]||0)!==(y[i]||0))return(x[i]||0)-(y[i]||0);return 0};
 const ICON='data:image/png;base64,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';
 function tbDown(e){if(e.target.closest('button'))return;api('start_drag')}
@@ -445,6 +471,7 @@ const loc=t=>new Date(t).toLocaleString('en-GB',{day:'numeric',month:'short',hou
 function wpNow(){if(!st.wp)return null;const n=Date.now(),e=n-st.wp.ts,v=st.wp.v,c0=st.wp.c||0,full=v>=240?st.wp.ts:st.wp.ts+(240-v)*36e4,c=Math.min(480,c0+Math.max(0,Math.floor((n-full)/72e4)));return{v:v>=240?v:Math.min(240,v+Math.floor(e/36e4)),left:Math.max(0,full-n),c,cleft:c>=480?0:Math.max(0,full+(480-c0)*72e4-n)}}
 function wpText(){const w=wpNow();if(!w)return'Waveplate: type your current value →';let t=w.v+'/240 · '+(w.left?'full in '+fmt(w.left):'FULL, regen is wasted!');
  if(w.left){const r=keys().next.d-Date.now(),over=w.v+r/36e4-240;if(over>0)t+=' · spend ≥'+Math.ceil(over)+' before reset'}return t}
+function updClick(){if(!UPD||UPD.busy)return;if(!UPD.a){api('open_url',UPD.u);return}UPD.busy=1;UPD.msg='Downloading update… the app will restart';render();api('do_update',UPD.a,UPD.d).then(r=>{if(r!=='ok'){UPD.busy=0;UPD.a='';UPD.msg='Update failed ('+esc(r)+'), click to open the download page';render()}})}
 function crText(){const w=wpNow();if(!w)return'Waveplate Crystal: type your current value →';return w.c+'/480 · '+(w.c>=480?'FULL, overflow is wasted!':(w.left?'starts when Waveplate is full · ':'')+'full in '+fmt(w.cleft))}
 const mcLeft=()=>st.mc?st.mc.end-Date.now():null;
 function mcText(){const l=mcLeft();if(l===null)return'Lunite Subscription: not set, enter days left or the purchase date';if(l<=0)return'Lunite Subscription: expired, renew?';return'Lunite Subscription: '+Math.floor(l/864e5)+'d '+p2(Math.floor(l%864e5/36e5))+'h left (ends '+loc(st.mc.end)+')'}
@@ -475,7 +502,7 @@ let beid=null;
 function render(){const k=keys(),c=st.tab,B=c==='b',ed=st.set.edit;cur=k;
  $('tabs').innerHTML=Object.keys(CATS).map(x=>`<button class="tab ${x==c?'on':''}" onclick="st.tab='${x}';save();render()"><span class="tl">${x==='b'&&bsort().length?esc(bsort()[0].n):CATS[x][0]}</span><small>${CATS[x][1]}</small></button>`).join('')+'<button class="tab g '+(st.ui?'on':'')+'" onclick="st.ui=st.ui?0:1;render()">⚙</button>';
  $('set').innerHTML=st.ui?settings():'';
- $('upd').innerHTML=UPD?`<div class="upd" onclick="api('open_url',UPD.u)">Update ${esc(UPD.v)} available – click to open the download page</div>`:'';
+ $('upd').innerHTML=UPD?`<div class="upd" onclick="updClick()">${UPD.msg||'Update '+esc(UPD.v)+' available – click to install'}</div>`:'';
  $('bar').style.display=B?'none':'';
  if(B){$('cd').textContent='Times are server time ('+UT()+'), shown in your local time';$('cnt').textContent='';$('wp').innerHTML='';
   const bs=bsort();
@@ -555,7 +582,7 @@ function boot(a,b){if(booted)return;booted=1;
  if(!st.banners){st.banners=[{id:'b1',n:'Hsin',s:Date.UTC(2026,8,30,3,0),e:Date.UTC(2026,9,22,8,59)}]}
  save();render();setInterval(tick,1000);
  document.addEventListener('visibilitychange',()=>tick());window.addEventListener('focus',()=>tick());window.addEventListener('beforeunload',()=>save());
- {document.addEventListener('focusin',e=>{if(st.set.top&&e.target.matches&&e.target.matches('input[type=text],input:not([type])'))api('typing',1)});document.addEventListener('focusout',e=>{if(e.target.matches&&e.target.matches('input'))api('typing',0)});$('tbi').src=ICON;if(st.set.upd)fetch('https://api.github.com/repos/xJubileus/WUWA-Tracker/releases/latest').then(x=>x.json()).then(j=>{const v=String(j.tag_name||'').replace(/^v/,'');if(v&&cmp(v,VER)>0){UPD={v,u:String(j.html_url)};render()}}).catch(()=>{});if(st.set.top)api('set_on_top',1,st.set.op||55);api('get_autostart').then(v=>{if(v!==null&&(v?1:0)!==st.set.auto){st.set.auto=v?1:0;save();render()}});}}
+ {document.addEventListener('focusin',e=>{if(st.set.top&&e.target.matches&&e.target.matches('input[type=text],input:not([type])'))api('typing',1)});document.addEventListener('focusout',e=>{if(e.target.matches&&e.target.matches('input'))api('typing',0)});$('tbi').src=ICON;if(st.set.upd)fetch('https://api.github.com/repos/xJubileus/WUWA-Tracker/releases/latest').then(x=>x.json()).then(j=>{const v=String(j.tag_name||'').replace(/^v/,'');if(v&&cmp(v,VER)>0){const as=(j.assets||[]).find(x=>/Setup\.exe$/i.test(x.name||''));UPD={v,u:String(j.html_url),a:as?String(as.browser_download_url):'',d:as?String(as.digest||''):''};render()}}).catch(()=>{});if(st.set.top)api('set_on_top',1,st.set.op||55);api('get_autostart').then(v=>{if(v!==null&&(v?1:0)!==st.set.auto){st.set.auto=v?1:0;save();render()}});}}
 const loadApp=()=>Promise.all([pywebview.api.load(),pywebview.api.load_tasks()]).then(r=>boot(r[0]==='{}'?'':r[0],r[1])).catch(()=>boot('',''));
 window.pywebview&&pywebview.api?loadApp():window.addEventListener('pywebviewready',loadApp);
 </script></body></html>

@@ -1,5 +1,5 @@
 #define AppName "WUWA Tracker"
-#define AppVer "1.1.0"
+#define AppVer "1.2.0"
 #define AppExe "WUWA Tracker.exe"
 
 [Setup]
@@ -8,7 +8,7 @@ AppName={#AppName}
 AppVersion={#AppVer}
 AppPublisher=Jubileus
 AppCopyright=Copyright (c) 2026 Jubileus
-VersionInfoVersion=1.1.0.0
+VersionInfoVersion=1.2.0.0
 VersionInfoCompany=Jubileus
 VersionInfoDescription=WUWA Tracker Setup
 VersionInfoProductName=WUWA Tracker
@@ -40,6 +40,7 @@ Root: HKCU; Subkey: "Software\Microsoft\Windows\CurrentVersion\Run"; ValueName: 
 
 [Run]
 Filename: "{app}\python\pythonw.exe"; Parameters: """{app}\app\wuwa_app.py"""; WorkingDir: "{app}\app"; Description: "Launch {#AppName}"; Flags: nowait postinstall skipifsilent
+Filename: "{app}\python\pythonw.exe"; Parameters: """{app}\app\wuwa_app.py"""; WorkingDir: "{app}\app"; Flags: nowait; Check: IsUpdate
 
 [Code]
 function WebView2Installed: Boolean;
@@ -48,6 +49,11 @@ begin
   Result := False;
   if RegQueryStringValue(HKLM32, 'SOFTWARE\Microsoft\EdgeUpdate\Clients\{F3017226-FE2A-4295-8BDF-00C3A9A7E4C5}', 'pv', v) and (v <> '') and (v <> '0.0.0.0') then Result := True
   else if RegQueryStringValue(HKCU, 'Software\Microsoft\EdgeUpdate\Clients\{F3017226-FE2A-4295-8BDF-00C3A9A7E4C5}', 'pv', v) and (v <> '') and (v <> '0.0.0.0') then Result := True;
+end;
+
+function IsUpdate: Boolean;
+begin
+  Result := ExpandConstant('{param:update|0}') = '1';
 end;
 
 function InitializeSetup: Boolean;
