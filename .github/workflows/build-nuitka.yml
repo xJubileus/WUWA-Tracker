@@ -1,0 +1,47 @@
+name: build-nuitka
+on:
+  push:
+  workflow_dispatch:
+
+# Nuitka compiles the Python code to C and then to a normal Windows program: no PyInstaller loader and no
+# packed Python archive inside, which is what most antivirus false positives react to.
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+      - run: pip install pywebview nuitka ordered-set zstandard
+
+      - name: Build the app
+        run: >
+          python -m nuitka --standalone --msvc=latest --assume-yes-for-downloads --windows-console-mode=disable
+          --windows-icon-from-ico=wuwa.ico --output-filename="WUWA Tracker.exe" --output-dir=out
+          --company-name=Jubileus --product-name="WUWA Tracker" --file-version=1.4.0.0 --product-version=1.4.0.0
+          --file-description="WUWA Tracker - Wuthering Waves daily checklist" --copyright="Copyright (c) 2026 Jubileus"
+          --include-data-files=wuwa.ico=wuwa.ico wuwa_app.py
+
+      - name: Smoke test (the app must start and load its interface)
+        continue-on-error: true
+        shell: pwsh
+        run: |
+          $env:APPDATA = Join-Path $env:RUNNER_TEMP 'appdata'
+          New-Item -ItemType Directory -Force $env:APPDATA | Out-Null
+          $app = Start-Process -FilePath 'out\wuwa_app.dist\WUWA Tracker.exe' -ArgumentList '--noadmin' -PassThru
+          Start-Sleep -Seconds 40
+          Stop-Process -Id $app.Id -Force -ErrorAction SilentlyContinue
+          $log = Get-Content (Join-Path $env:APPDATA 'WuWaTracker\error.log') -Raw -ErrorAction SilentlyContinue
+          Write-Output $log
+          if ($log -notmatch 'interface ready') { Write-Output '::warning::The built app did not report "interface ready"'; exit 1 }
+
+      - run: choco install innosetup -y --no-progress
+      - run: '& "C:\Program Files (x86)\Inno Setup 6\ISCC.exe" /DSourceDir=out\wuwa_app.dist installer.iss'
+
+      - uses: actions/upload-artifact@v6
+        with:
+          name: WUWA-Tracker-Nuitka
+          path: |
+            Output/WUWA-Tracker-Setup.exe
+            out/wuwa_app.dist/WUWA Tracker.exe

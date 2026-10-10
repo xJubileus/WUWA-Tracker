@@ -6,6 +6,8 @@ echo.
 pause
 py -m pip install --upgrade pip wheel
 py -m pip uninstall -y pyinstaller
+rem Without this variable pip just unpacks the ready-made bootloaders shipped with PyInstaller.
+set PYINSTALLER_COMPILE_BOOTLOADER=1
 py -m pip install --no-binary pyinstaller --no-cache-dir pyinstaller
 if errorlevel 1 (
   echo Building PyInstaller from source failed - usually the C compiler is missing.

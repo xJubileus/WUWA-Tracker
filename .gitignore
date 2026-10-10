@@ -6,3 +6,5 @@ __pycache__/
 *.spec
 *.log
 *.tmp
+design-previews/
+*.zip

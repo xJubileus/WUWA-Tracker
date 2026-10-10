@@ -10,10 +10,15 @@ I made it for myself and a few friends. It is free, open source and not affiliat
 - Daily, weekly and monthly task lists that reset with your server (Europe, America, Asia, SEA, HMT)
 - Waveplate and Waveplate Crystal counters, with an alert shortly before your Waveplate is full
 - Nightmare Nests and weekly bosses you can tick off one by one
-- Banner countdowns and a Lunite Subscription timer
+- Banner and event countdowns and a Lunite Subscription timer
+- A week overview that shows which days you finished all daily tasks
 - A reminder before the daily reset if something is still open
 - An optional see-through overlay that stays on top of the game (hold ALT to click it)
+- A compact view that only shows the timers, handy next to the game
+- Keyboard shortcuts: 1–4 switch tabs, Ctrl+N adds a task
 - One-click updates straight from this page
+- Light, dark or system theme
+- Export and import a backup of your progress and tasks
 
 You can add your own tasks, rename them, drag them into a different order or remove them.
 
@@ -35,6 +40,8 @@ The app only goes online to check this page for a new version (you can turn that
 
 You need Python 3.12 or newer. Run `build.bat`: it builds the app with PyInstaller and, if Inno Setup is installed, the installer too.
 Every change pushed here is also built automatically by GitHub Actions.
+
+To check the reset times and the other calculations after a change, run `python tests/test_logic.py`.
 
 ## Bugs and ideas
 

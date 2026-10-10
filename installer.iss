@@ -1,5 +1,5 @@
 #define AppName "WUWA Tracker"
-#define AppVer "1.3.0"
+#define AppVer "1.4.0"
 #define AppExe "WUWA Tracker.exe"
 #ifndef SourceDir
   #define SourceDir "dist\WUWA Tracker"
@@ -11,7 +11,7 @@ AppName={#AppName}
 AppVersion={#AppVer}
 AppPublisher=Jubileus
 AppCopyright=Copyright (c) 2026 Jubileus
-VersionInfoVersion=1.3.0.0
+VersionInfoVersion=1.4.0.0
 VersionInfoCompany=Jubileus
 VersionInfoDescription=WUWA Tracker Setup
 VersionInfoProductName=WUWA Tracker

@@ -11,12 +11,55 @@ jobs:
       - uses: actions/setup-python@v6
         with:
           python-version: "3.12"
-      - run: pip install pywebview pyinstaller
-      - run: pyinstaller --noconfirm --clean --onedir --windowed --name "WUWA Tracker" --icon wuwa.ico --version-file version.txt --exclude-module tkinter --add-data "wuwa.ico;." wuwa_app.py
+
+      - name: Check that every version number matches
+        run: python tests/check_versions.py
+
+      - name: Install requirements
+        run: pip install pywebview
+
+      # PyInstaller's ready-made bootloader is shared by every PyInstaller program, malware included, which costs
+      # antivirus points. Compiling our own one (the runner has the C compiler) gives the exe a unique loader.
+      - name: Install PyInstaller with a freshly compiled bootloader
+        env:
+          PYINSTALLER_COMPILE_BOOTLOADER: "1"
+        run: pip install --no-binary pyinstaller --no-cache-dir pyinstaller
+
+      - name: Build the app
+        run: pyinstaller --noconfirm --clean --onedir --windowed --name "WUWA Tracker" --icon wuwa.ico --version-file version.txt --exclude-module tkinter --add-data "wuwa.ico;." wuwa_app.py
+
+      - name: Smoke test (the app must start and load its interface)
+        continue-on-error: true
+        shell: pwsh
+        run: |
+          $env:APPDATA = Join-Path $env:RUNNER_TEMP 'appdata'
+          New-Item -ItemType Directory -Force $env:APPDATA | Out-Null
+          $app = Start-Process -FilePath 'dist\WUWA Tracker\WUWA Tracker.exe' -ArgumentList '--noadmin' -PassThru
+          Start-Sleep -Seconds 40
+          Stop-Process -Id $app.Id -Force -ErrorAction SilentlyContinue
+          $log = Get-Content (Join-Path $env:APPDATA 'WuWaTracker\error.log') -Raw -ErrorAction SilentlyContinue
+          Write-Output $log
+          if ($log -notmatch 'interface ready') { Write-Output '::warning::The built app did not report "interface ready"'; exit 1 }
+
       - run: choco install innosetup -y --no-progress
       - run: '& "C:\Program Files (x86)\Inno Setup 6\ISCC.exe" installer.iss'
+
       - uses: actions/upload-artifact@v6
         id: upload
         with:
-          name: WUWA-Tracker-Setup
-          path: Output/WUWA-Tracker-Setup.exe
+          name: WUWA-Tracker-PyInstaller
+          path: |
+            Output/WUWA-Tracker-Setup.exe
+            dist/WUWA Tracker/WUWA Tracker.exe
+
+      # After SignPath Foundation approves the project, add a signing step here
+      # (organization id, project slug and policy come from your SignPath account):
+      # - uses: signpath/github-action-submit-signing-request@v1
+      #   with:
+      #     api-token: ${{ secrets.SIGNPATH_API_TOKEN }}
+      #     organization-id: "<your-org-id>"
+      #     project-slug: "wuwa-tracker"
+      #     signing-policy-slug: "release-signing"
+      #     github-artifact-id: ${{ steps.upload.outputs.artifact-id }}
+      #     wait-for-completion: true
+      #     output-artifact-directory: signed
